@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tema base de la ventana; los colores reales los pone Compose (ui/theme). -->
+    <style name="Theme.MicCheck" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
