@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fondo de los íconos de los Arcanos: azul noche que se aclara hacia el durazno. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient
+        android:angle="270"
+        android:startColor="#FF1F2A5C"
+        android:centerColor="#FF34356A"
+        android:endColor="#FF8A6A80"
+        android:type="linear" />
+</shape>
