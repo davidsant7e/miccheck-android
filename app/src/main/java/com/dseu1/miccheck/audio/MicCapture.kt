@@ -1,6 +1,7 @@
 package com.dseu1.miccheck.audio
 
 import android.Manifest
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -36,9 +37,18 @@ class MicCapture(
     /**
      * VOICE_RECOGNITION suele entregar el audio sin control automático de ganancia,
      * así los niveles reflejan mejor el estado real del micrófono que la fuente MIC.
+     *
+     * @param device micrófono preferido (null = el que elija Android). Ver [MicRoute].
+     * @param source fuente de AudioRecord; para Bluetooth se usa VOICE_COMMUNICATION.
+     * @param onRouted avisa qué micrófono usó Android de verdad al empezar a grabar.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    fun frames(frameSize: Int = FRAME_SIZE): Flow<AudioFrame> = flow {
+    fun frames(
+        frameSize: Int = FRAME_SIZE,
+        device: AudioDeviceInfo? = null,
+        source: Int = MediaRecorder.AudioSource.VOICE_RECOGNITION,
+        onRouted: ((AudioDeviceInfo?) -> Unit)? = null,
+    ): Flow<AudioFrame> = flow {
         val channel = AudioFormat.CHANNEL_IN_MONO
         val encoding = AudioFormat.ENCODING_PCM_16BIT
         val minBuffer = AudioRecord.getMinBufferSize(sampleRate, channel, encoding)
@@ -48,7 +58,7 @@ class MicCapture(
 
         val record = try {
             AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                source,
                 sampleRate,
                 channel,
                 encoding,
@@ -63,11 +73,15 @@ class MicCapture(
             throw MicException("No se pudo abrir el micrófono. Revisa el permiso y que ninguna llamada esté en curso.")
         }
 
+        if (device != null) record.setPreferredDevice(device)
+
         try {
             record.startRecording()
             if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                 throw MicException("No se pudo empezar a grabar: otra app puede estar usando el micrófono.")
             }
+
+            onRouted?.invoke(record.routedDevice ?: device)
 
             val buffer = ShortArray(frameSize)
             while (currentCoroutineContext().isActive) {

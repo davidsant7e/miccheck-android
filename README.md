@@ -7,6 +7,7 @@ App Android que revisa si el micrófono del celular funciona bien y da sugerenci
 
 ## Qué hace
 
+- **Elegir el micrófono**: Automático, el del celular, audífonos con cable, USB o **Bluetooth**. Con Bluetooth la app abre el «modo llamada» del audífono (perfil HFP/SCO), que es el único en el que Android deja usar su micrófono, y lo cierra al terminar. Avisa si Android terminó grabando con otro micrófono. La elección se recuerda.
 - **Diagnóstico completo** (unos 20 s, 3 pasos):
   1. *Ruido de fondo*: el usuario guarda silencio y se mide el ruido.
   2. *Tu voz*: el usuario habla; se mide cuánto sobresale la voz del ruido y si hay saturación.
@@ -40,7 +41,10 @@ app/src/main/java/com/dseu1/miccheck/
 ├── audio/
 │   ├── LevelMath.kt           Cálculos: RMS, pico, saturación, Goertzel, promedio en dB. Sin Android.
 │   ├── AudioFrame.kt          Bloque de 100 ms con sus niveles.
-│   ├── MicCapture.kt          AudioRecord como Flow (graba mientras se recolecta).
+│   ├── MicCapture.kt          AudioRecord como Flow (graba mientras se recolecta), con micrófono preferido.
+│   ├── MicKind.kt             Tipos de micrófono y la opción elegida. Sin Android.
+│   ├── MicInputs.kt           Micrófonos conectados (AudioManager.getDevices).
+│   ├── MicRoute.kt            Abre/cierra el camino al micrófono (Bluetooth: modo llamada).
 │   ├── PcmPlayer.kt           AudioTrack: reproduce PCM y genera el tono.
 │   ├── EnvironmentInfo.kt     Datos del entorno (clase simple).
 │   └── AudioEnvironment.kt    Lee el entorno desde AudioManager.

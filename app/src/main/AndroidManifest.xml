@@ -4,6 +4,10 @@
     <!-- Permiso para grabar con el micrófono (se pide en tiempo de ejecución). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- Para usar el micrófono de un audífono Bluetooth: poner el teléfono en modo llamada (no se pide al usuario). -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+
     <!-- La app solo tiene sentido en equipos con micrófono. -->
     <uses-feature
         android:name="android.hardware.microphone"

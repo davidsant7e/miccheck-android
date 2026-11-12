@@ -1,6 +1,7 @@
 package com.dseu1.miccheck.diagnosis
 
 import com.dseu1.miccheck.audio.EnvironmentInfo
+import com.dseu1.miccheck.audio.MicKind
 
 /** Resultado de una prueba: bien, aviso, falla o solo información. */
 enum class Status { OK, WARNING, FAIL, INFO }
@@ -76,8 +77,15 @@ object DiagnosisAnalyzer {
     private const val SUGGEST_SERVICE =
         "Si el problema sigue después de limpiar y reiniciar, llévalo a servicio técnico."
     private const val SUGGEST_QUIET = "Repite la prueba en un lugar más silencioso."
+    private const val VOICE_DISTANCE = "Repite la prueba hablando a unos 20 cm del borde inferior del celular."
     private const val SUGGEST_DISCONNECT =
         "Desconecta los audífonos o el Bluetooth para probar el micrófono del celular."
+    private const val SUGGEST_EXT_RECONNECT =
+        "Desconecta y vuelve a conectar el micrófono externo (o apaga y prende el audífono Bluetooth)."
+    private const val SUGGEST_EXT_CHECK =
+        "Revisa el micrófono externo: que tenga carga, que no esté silenciado (muchos tienen botón de silencio) y que la rejilla esté limpia."
+    private const val SUGGEST_BT_CALLS =
+        "En Ajustes → Bluetooth → tu audífono, revisa que esté activado «Llamadas» o «Audio del teléfono»."
 
     fun analyze(env: EnvironmentInfo, m: Measurements): List<CheckResult> {
         val results = mutableListOf<CheckResult>()
@@ -92,7 +100,9 @@ object DiagnosisAnalyzer {
         }
 
         // 1. ¿Qué micrófono se está usando?
-        results += if (env.externalInput != null) {
+        results += if (env.selectedMic != MicKind.AUTO) {
+            chosenMicResult(env)
+        } else if (env.externalInput != null) {
             CheckResult(
                 "Micrófono usado",
                 Status.WARNING,
@@ -130,7 +140,7 @@ object DiagnosisAnalyzer {
         // Si no llega audio, las demás pruebas de nivel no tienen sentido.
         if (totalSilence || m.clientSilenced) {
             results += environmentInfo(env)
-            return results
+            return adaptForExternal(env, results)
         }
 
         // 3. Ruido de fondo.
@@ -158,7 +168,7 @@ object DiagnosisAnalyzer {
                 Status.FAIL,
                 "La voz casi no se distingue del ruido (voz ${db(m.voiceLevelDb)}, ${margin.oneDecimal()} dB sobre el fondo).",
                 listOf(
-                    "Repite la prueba hablando a unos 20 cm del borde inferior del celular.",
+                    VOICE_DISTANCE,
                     SUGGEST_CASE,
                     SUGGEST_CLEAN,
                     SUGGEST_SERVICE,
@@ -197,11 +207,62 @@ object DiagnosisAnalyzer {
         results += toneResult(env, m)
 
         results += environmentInfo(env)
-        return results
+        return adaptForExternal(env, results)
+    }
+
+    /** El usuario eligió un micrófono: ¿Android usó ese? */
+    private fun chosenMicResult(env: EnvironmentInfo): CheckResult {
+        val chosen = env.selectedMicLabel ?: env.selectedMic.label
+        val used = env.usedMic
+        return when {
+            used == null -> CheckResult(
+                "Micrófono usado",
+                Status.INFO,
+                "Elegiste $chosen. Android no informó qué micrófono usó.",
+            )
+            used != env.selectedMic -> CheckResult(
+                "Micrófono usado",
+                Status.WARNING,
+                "Elegiste $chosen, pero Android grabó con ${env.usedMicLabel ?: used.label}.",
+                buildList {
+                    add(SUGGEST_EXT_RECONNECT)
+                    if (env.selectedMic == MicKind.BLUETOOTH) add(SUGGEST_BT_CALLS)
+                    add("Cierra las apps de llamadas o videollamadas y repite el diagnóstico.")
+                },
+            )
+            else -> CheckResult("Micrófono usado", Status.OK, "Se usó ${env.usedMicLabel ?: chosen}, el que elegiste.")
+        }
+    }
+
+    /**
+     * Si el micrófono probado está fuera del celular, las sugerencias del orificio y el estuche no aplican:
+     * se cambian por las del micrófono externo.
+     */
+    private fun adaptForExternal(env: EnvironmentInfo, results: List<CheckResult>): List<CheckResult> {
+        val external = (env.usedMic ?: env.selectedMic).external && env.selectedMic != MicKind.AUTO
+        if (!external) return results
+        return results.map { r ->
+            val adapted = r.suggestions.map {
+                when (it) {
+                    SUGGEST_CLEAN -> SUGGEST_EXT_CHECK
+                    SUGGEST_CASE -> SUGGEST_EXT_RECONNECT
+                    VOICE_DISTANCE -> "Repite la prueba con el micrófono del audífono cerca de la boca."
+                    else -> it
+                }
+            }.distinct()
+            r.copy(suggestions = adapted)
+        }
     }
 
     private fun toneResult(env: EnvironmentInfo, m: Measurements): CheckResult {
         val title = "Tono del parlante"
+        if (env.selectedMic.external) {
+            return CheckResult(
+                title,
+                Status.INFO,
+                "La prueba del pitido es para el micrófono del celular; con ${env.selectedMicLabel ?: env.selectedMic.label} no se hace.",
+            )
+        }
         if (env.externalOutput != null) {
             return CheckResult(
                 title,
@@ -251,6 +312,12 @@ object DiagnosisAnalyzer {
                 add("Micrófonos físicos: ${env.microphones.size} (${env.microphones.joinToString("; ")}).")
             }
             if (env.inputs.isNotEmpty()) add("Entradas: ${env.inputs.joinToString(", ")}.")
+            if (env.selectedMic == MicKind.BLUETOOTH) {
+                add(
+                    "Con Bluetooth el audio llega en calidad de llamada (8 a 16 kHz) y Android le aplica reducción de ruido, " +
+                        "así que los niveles no se comparan uno a uno con el micrófono del celular."
+                )
+            }
             add(
                 "Efectos: cancelación de eco ${yesNo(env.echoCancelerAvailable)}, " +
                     "reducción de ruido ${yesNo(env.noiseSuppressorAvailable)}, " +

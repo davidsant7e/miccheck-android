@@ -9,19 +9,26 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.dseu1.miccheck.audio.EnvironmentInfo
+import com.dseu1.miccheck.audio.MicKind
+import com.dseu1.miccheck.audio.MicOption
 import com.dseu1.miccheck.ui.MainViewModel
 import com.dseu1.miccheck.ui.MeterState
 import com.dseu1.miccheck.ui.RecordPhase
@@ -36,6 +43,9 @@ fun HomeScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val meter by vm.meter.collectAsStateWithLifecycle()
     val record by vm.record.collectAsStateWithLifecycle()
     val environment by vm.environment.collectAsStateWithLifecycle()
+    val mics by vm.mics.collectAsStateWithLifecycle()
+    val selectedMic by vm.selectedMic.collectAsStateWithLifecycle()
+    val usedMic by vm.usedMic.collectAsStateWithLifecycle()
 
     Column(
         modifier = modifier
@@ -49,10 +59,62 @@ fun HomeScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             style = MaterialTheme.typography.bodyMedium,
         )
 
+        MicCard(mics, selectedMic, usedMic, onSelect = vm::selectMic, onRefresh = vm::refreshMics)
         DiagnosisCard(onStart = vm::startDiagnosis)
         MeterCard(meter = meter, onToggle = vm::toggleMeter)
         RecordCard(record = record, onRecord = vm::startRecording, onPlay = vm::playRecording, onStop = vm::stopAll)
         environment?.let { EnvironmentCard(it) }
+    }
+}
+
+/** Elegir qué micrófono probar: automático, el del celular, con cable, USB o Bluetooth. */
+@Composable
+private fun MicCard(
+    mics: List<MicOption>,
+    selected: MicOption,
+    used: MicOption?,
+    onSelect: (MicOption) -> Unit,
+    onRefresh: () -> Unit,
+) {
+    SectionCard(title = "Micrófono a probar") {
+        val connected = selected.kind == MicKind.AUTO || mics.any { it.key == selected.key }
+        // Si el elegido no está conectado, igual se muestra (marcado) para que se vea qué se había elegido.
+        val options = if (connected) mics else mics + selected
+        options.forEach { option ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .selectable(selected = option.key == selected.key, onClick = { onSelect(option) }, role = Role.RadioButton)
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = option.key == selected.key, onClick = null)
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text(option.label, style = MaterialTheme.typography.bodyLarge)
+                    val hint = when {
+                        option.key == selected.key && !connected -> "No está conectado"
+                        option.kind == MicKind.AUTO -> "El que use Android (con audífonos conectados suele ser el de ellos)"
+                        option.kind == MicKind.BLUETOOTH -> "Modo llamada: calidad de teléfono"
+                        else -> null
+                    }
+                    hint?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+            }
+        }
+        if (mics.none { it.kind == MicKind.BLUETOOTH }) {
+            Text(
+                "¿Buscas un Bluetooth? Conéctalo en Ajustes y pulsa «Buscar de nuevo».",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (used != null && selected.kind != MicKind.AUTO && used.kind != selected.kind) {
+            Warning("La última grabación la hizo Android con ${used.label}, no con el que elegiste.")
+        } else if (used != null) {
+            Text("Última grabación con: ${used.label}", style = MaterialTheme.typography.bodySmall)
+        }
+        TextButton(onClick = onRefresh) { Text("Buscar de nuevo") }
     }
 }
 

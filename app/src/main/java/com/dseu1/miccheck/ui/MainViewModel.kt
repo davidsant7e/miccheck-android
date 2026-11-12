@@ -2,6 +2,9 @@ package com.dseu1.miccheck.ui
 
 import android.annotation.SuppressLint
 import android.app.Application
+import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.MediaRecorder
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.dseu1.miccheck.audio.AudioEnvironment
@@ -9,6 +12,10 @@ import com.dseu1.miccheck.audio.AudioFrame
 import com.dseu1.miccheck.audio.EnvironmentInfo
 import com.dseu1.miccheck.audio.LevelMath
 import com.dseu1.miccheck.audio.MicCapture
+import com.dseu1.miccheck.audio.MicInputs
+import com.dseu1.miccheck.audio.MicKind
+import com.dseu1.miccheck.audio.MicOption
+import com.dseu1.miccheck.audio.MicRoute
 import com.dseu1.miccheck.audio.PcmPlayer
 import com.dseu1.miccheck.diagnosis.CheckResult
 import com.dseu1.miccheck.diagnosis.DiagnosisAnalyzer
@@ -94,10 +101,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _environment = MutableStateFlow<EnvironmentInfo?>(null)
     val environment: StateFlow<EnvironmentInfo?> = _environment.asStateFlow()
 
+    // ---------- Elegir micrófono ----------
+
+    private val prefs = application.getSharedPreferences("ajustes", Context.MODE_PRIVATE)
+
+    private val _mics = MutableStateFlow(listOf(MicOption.AUTO))
+    /** Micrófonos conectados (el primero siempre es «Automático»). */
+    val mics: StateFlow<List<MicOption>> = _mics.asStateFlow()
+
+    private val _selectedMic = MutableStateFlow(MicOption.fromKey(prefs.getString("mic", null)))
+    val selectedMic: StateFlow<MicOption> = _selectedMic.asStateFlow()
+
+    private val _usedMic = MutableStateFlow<MicOption?>(null)
+    /** El micrófono que Android usó de verdad en la última grabación. */
+    val usedMic: StateFlow<MicOption?> = _usedMic.asStateFlow()
+
+    /** Dispositivo y fuente de la operación de audio en curso (las prepara [withMic]). */
+    private var routeDevice: AudioDeviceInfo? = null
+    private var routeSource: Int = MediaRecorder.AudioSource.VOICE_RECOGNITION
+
+    fun selectMic(option: MicOption) {
+        stopAll()
+        _selectedMic.value = option
+        _usedMic.value = null
+        prefs.edit().putString("mic", option.key).apply()
+    }
+
+    fun refreshMics() {
+        _mics.value = runCatching { MicInputs.list(getApplication()) }.getOrDefault(listOf(MicOption.AUTO))
+    }
+
+    /** Abre el camino al micrófono elegido (Bluetooth: modo llamada), corre [block] y lo cierra siempre. */
+    private suspend fun <T> withMic(block: suspend () -> T): T {
+        val route = MicRoute(getApplication())
+        val option = _selectedMic.value
+        try {
+            routeDevice = route.open(option)
+            routeSource = route.source(option)
+            return block()
+        } finally {
+            route.close()
+            routeDevice = null
+            routeSource = MediaRecorder.AudioSource.VOICE_RECOGNITION
+        }
+    }
+
+    private fun micFrames(frameSize: Int = MicCapture.FRAME_SIZE) =
+        capture.frames(frameSize, routeDevice, routeSource) { device ->
+            _usedMic.value = device?.let { MicInputs.option(it) }
+        }
+
     // ---------- Entorno ----------
 
     fun refreshEnvironment() {
         _environment.value = runCatching { AudioEnvironment.read(getApplication()) }.getOrNull()
+        refreshMics()
     }
 
     // ---------- Medidor en vivo ----------
@@ -114,7 +172,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var holdAge = 0
             try {
                 // Bloques de 50 ms para que la barra se mueva con fluidez.
-                capture.frames(frameSize = MicCapture.FRAME_SIZE / 2).collect { frame ->
+                withMic { micFrames(frameSize = MicCapture.FRAME_SIZE / 2).collect { frame ->
                     // "Pico retenido": la marca se queda ~1 s en el valor más alto y luego baja.
                     if (frame.peakDb >= hold || holdAge > 20) {
                         hold = frame.peakDb
@@ -131,7 +189,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             silencedByOtherApp = frame.clientSilenced == true,
                         )
                     }
-                }
+                } }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -150,10 +208,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val total = RECORD_SECONDS * 10 // bloques de 100 ms
             val chunks = ArrayList<ShortArray>(total)
             try {
-                capture.frames().take(total).collectIndexed { index, frame ->
-                    chunks += frame.samples
-                    _record.update {
-                        it.copy(progress = (index + 1f) / total, levelDb = frame.rmsDb)
+                withMic {
+                    micFrames().take(total).collectIndexed { index, frame ->
+                        chunks += frame.samples
+                        _record.update {
+                            it.copy(progress = (index + 1f) / total, levelDb = frame.rmsDb)
+                        }
                     }
                 }
                 lastRecording = concat(chunks)
@@ -194,14 +254,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopAll()
         audioJob = viewModelScope.launch {
             try {
-                val env = AudioEnvironment.read(getApplication())
-                _environment.value = env
-                val canTestTone = env.externalOutput == null && !env.mediaVolumeZero
+                val chosen = _selectedMic.value
+                val env0 = AudioEnvironment.read(getApplication())
+                _environment.value = env0
+                // El pitido solo prueba el micrófono del celular (con uno externo no tiene sentido).
+                val canTestTone = env0.externalOutput == null && !env0.mediaVolumeZero && !chosen.kind.external
                 val totalSteps = if (canTestTone) 3 else 2
 
-                val quiet = measureStep(DiagnosisStep.QUIET, 1, totalSteps, frames = 25, skip = 5)
-                val voice = measureStep(DiagnosisStep.VOICE, 2, totalSteps, frames = 40, skip = 2)
-                val toneDb = if (canTestTone) measureTone(3, totalSteps) else null
+                _usedMic.value = null
+                // Mientras se abre el micrófono (con Bluetooth tarda 1–3 s) ya se ve la pantalla del diagnóstico.
+                _diagnosis.value = DiagnosisState.Running(DiagnosisStep.QUIET, 1, totalSteps, 3, 0f, LevelMath.MIN_DB)
+                val (quiet, voice, toneDb) = withMic {
+                    val q = measureStep(DiagnosisStep.QUIET, 1, totalSteps, frames = 25, skip = 5)
+                    val v = measureStep(DiagnosisStep.VOICE, 2, totalSteps, frames = 40, skip = 2)
+                    Triple(q, v, if (canTestTone) measureTone(3, totalSteps) else null)
+                }
+                val used = _usedMic.value
+                val env = env0.copy(
+                    selectedMic = chosen.kind,
+                    selectedMicLabel = chosen.label.takeIf { chosen.kind != MicKind.AUTO },
+                    usedMic = used?.kind,
+                    usedMicLabel = used?.label,
+                )
 
                 val measurements = Measurements(
                     noiseFloorDb = LevelMath.averageDb(quiet.map { it.rmsDb }),
@@ -240,7 +314,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         countdown(step, number, total)
         val kept = ArrayList<AudioFrame>(frames)
         val all = frames + skip
-        capture.frames().take(all).collectIndexed { index, frame ->
+        micFrames().take(all).collectIndexed { index, frame ->
             if (index >= skip) kept += frame
             _diagnosis.value = DiagnosisState.Running(step, number, total, 0, (index + 1f) / all, frame.rmsDb)
         }
@@ -257,7 +331,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val levels = ArrayList<Double>()
         val all = 18
-        capture.frames().take(all).collectIndexed { index, frame ->
+        micFrames().take(all).collectIndexed { index, frame ->
             if (index >= 3) levels += frame.toneDb(TONE_HZ) // los primeros bloques pueden traer el arranque
             _diagnosis.value = DiagnosisState.Running(step, number, total, 0, (index + 1f) / all, frame.rmsDb)
         }

@@ -22,4 +22,11 @@ data class EnvironmentInfo(
     val otherActiveRecordings: Int = 0,
     /** El volumen multimedia está en cero (la prueba del parlante no serviría). */
     val mediaVolumeZero: Boolean = false,
+    /** Micrófono que eligió el usuario (AUTO = el que decida Android). */
+    val selectedMic: MicKind = MicKind.AUTO,
+    /** Nombre del micrófono elegido, para mostrarlo ("Bluetooth · Buds Pro"). */
+    val selectedMicLabel: String? = null,
+    /** Micrófono que Android usó de verdad al grabar; null si no se supo. */
+    val usedMic: MicKind? = null,
+    val usedMicLabel: String? = null,
 )
