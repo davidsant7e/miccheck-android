@@ -15,6 +15,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.dseu1.miccheck.MainActivity
 import com.dseu1.miccheck.R
+import com.dseu1.miccheck.datos.Registro
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -45,6 +46,7 @@ class PuenteBluetooth : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        Registro.iniciar(this)
         crearCanal()
         val tipo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0
         ServiceCompat.startForeground(this, NOTIFICACION, notificacion("Abriendo el micrófono Bluetooth…"), tipo)
@@ -52,6 +54,7 @@ class PuenteBluetooth : Service() {
             val opcion = MicInputs.list(this).firstOrNull { it.kind == MicKind.BLUETOOTH }
             if (opcion == null) {
                 _estado.value = Estado(false, "No hay un audífono Bluetooth conectado.")
+                Registro.evento("PUENTE", "error", linkedMapOf<String, Any?>("error" to "sin audífono Bluetooth") + Registro.equipo(this))
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -59,11 +62,14 @@ class PuenteBluetooth : Service() {
             ruta = r
             scope.launch {
                 try {
+                    Registro.evento("PUENTE", "inicio", linkedMapOf<String, Any?>("microfono" to opcion.label) + Registro.equipo(this@PuenteBluetooth))
                     r.open(opcion)
+                    Registro.evento("PUENTE", "activo", Registro.equipo(this@PuenteBluetooth))
                     _estado.value = Estado(true, "Las apps que graben ahora deberían usar ${opcion.label}.")
                     getSystemService(NotificationManager::class.java)
                         .notify(NOTIFICACION, notificacion("Micrófono: ${opcion.label}. Graba en la otra app."))
                 } catch (e: Exception) {
+                    Registro.evento("PUENTE", "error", linkedMapOf<String, Any?>("error" to (e.message ?: e.javaClass.simpleName)) + Registro.equipo(this@PuenteBluetooth))
                     _estado.value = Estado(false, e.message ?: "No se pudo abrir el micrófono Bluetooth.")
                     stopSelf()
                 }
@@ -73,6 +79,7 @@ class PuenteBluetooth : Service() {
     }
 
     override fun onDestroy() {
+        if (ruta != null) Registro.evento("PUENTE", "detenido", Registro.equipo(this))
         ruta?.close()
         ruta = null
         scope.cancel()

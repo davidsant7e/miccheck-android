@@ -30,6 +30,12 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.widget.Toast
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.text.font.FontFamily
+import kotlinx.coroutines.launch
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,6 +66,7 @@ fun HomeScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val usedMic by vm.usedMic.collectAsStateWithLifecycle()
     val grabadora by vm.grabadora.collectAsStateWithLifecycle()
     val puente by PuenteBluetooth.estado.collectAsStateWithLifecycle()
+    val registro by vm.registro.collectAsStateWithLifecycle()
 
     Column(
         modifier = modifier
@@ -80,6 +87,7 @@ fun HomeScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         GrabadoraCard(grabadora, selectedMic, vm)
         PuenteCard(puente, hayBluetooth = mics.any { it.kind == MicKind.BLUETOOTH })
         environment?.let { EnvironmentCard(it) }
+        RegistroCard(registro, vm)
     }
 }
 
@@ -140,6 +148,66 @@ private fun compartir(context: Context, uri: Uri) {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     context.startActivity(Intent.createChooser(i, "Enviar grabación"))
+}
+
+/** Registro de cada prueba: enviarlo a Claude desde el celular o traerlo al PC por cable. */
+@Composable
+private fun RegistroCard(lineas: List<String>, vm: MainViewModel) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    SectionCard(title = "Registro") {
+        Text(
+            "Cada prueba queda anotada: hora, micrófono elegido y el que usó Android, niveles por segundo, silencios y el estado del Bluetooth. " +
+                "No guarda audio. Envíalo a Claude para que lo revise.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.height(8.dp))
+        if (lineas.isEmpty()) {
+            Text("Todavía no hay nada anotado.", style = MaterialTheme.typography.bodySmall)
+        } else {
+            lineas.takeLast(6).forEach { l ->
+                // Solo hora, acción y fase: el detalle completo va en lo que se envía.
+                val partes = l.split(" | ")
+                val corto = listOfNotNull(partes.getOrNull(0)?.substringAfter(' ')?.substringBefore('.'), partes.getOrNull(1), partes.getOrNull(2),
+                    partes.firstOrNull { it.startsWith("resultado=") || it.startsWith("estado=") || it.startsWith("nivel_prom_dbfs=") })
+                Text(corto.joinToString(" · "), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth()) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        val texto = vm.textoRegistro()
+                        val i = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "Registro de El Juicio")
+                            putExtra(Intent.EXTRA_TEXT, "Revisa este registro de El Juicio (MicCheck) y dime qué pasó:\n\n$texto")
+                        }
+                        context.startActivity(Intent.createChooser(i, "Enviar registro"))
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) { Text("Enviar registro") }
+            Spacer(Modifier.width(12.dp))
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("Registro de El Juicio", vm.textoRegistro()))
+                        Toast.makeText(context, "Registro copiado", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) { Text("Copiar") }
+        }
+        TextButton(onClick = vm::refrescarRegistro) { Text("Actualizar") }
+        Text(
+            "Desde el PC (cable): adb -s ZY22KKQ9LD pull /sdcard/Android/data/com.dseu1.miccheck/files/registros %USERPROFILE%\\Downloads\\eljuicio-registros",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 /** Experimental: dejar abierto el Bluetooth para que otras apps graben con él. */

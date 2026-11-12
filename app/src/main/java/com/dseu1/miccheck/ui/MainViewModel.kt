@@ -26,6 +26,9 @@ import com.dseu1.miccheck.audio.PcmPlayer
 import com.dseu1.miccheck.audio.WavFile
 import com.dseu1.miccheck.datos.Grabacion
 import com.dseu1.miccheck.datos.Grabaciones
+import com.dseu1.miccheck.datos.Registro
+import com.dseu1.miccheck.audio.Bitacora
+import kotlinx.coroutines.flow.onEach
 import com.dseu1.miccheck.diagnosis.CheckResult
 import com.dseu1.miccheck.diagnosis.DiagnosisAnalyzer
 import com.dseu1.miccheck.diagnosis.Measurements
@@ -107,6 +110,10 @@ data class RecordState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val capture = MicCapture()
+
+    init {
+        Registro.iniciar(application)
+    }
     private var audioJob: Job? = null
     private var lastRecording: ShortArray? = null
 
@@ -143,6 +150,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectMic(option: MicOption) {
         stopAll()
+        Registro.evento("MICROFONO", "elegido", mapOf("elegido" to option.label, "antes" to _selectedMic.value.label))
         _selectedMic.value = option
         _usedMic.value = null
         prefs.edit().putString("mic", option.key).apply()
@@ -152,32 +160,98 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _mics.value = runCatching { MicInputs.list(getApplication()) }.getOrDefault(listOf(MicOption.AUTO))
     }
 
-    /** Abre el camino al micrófono elegido (Bluetooth: modo llamada), corre [block] y lo cierra siempre. */
-    private suspend fun <T> withMic(block: suspend () -> T): T {
-        val route = MicRoute(getApplication())
+    /** Estadística de la acción en curso (la llenan los bloques de audio que llegan). */
+    private var estadistica: Bitacora.Estadistica? = null
+
+    /**
+     * Abre el camino al micrófono elegido (Bluetooth: modo llamada), corre [block] y lo cierra siempre.
+     * Además deja en el registro el inicio, el estado del audio con el micrófono ya abierto y el final
+     * con lo que llegó del micrófono (niveles por segundo, silencios) y cómo terminó.
+     */
+    private suspend fun <T> withMic(accion: String, block: suspend () -> T): T {
+        val app = getApplication<Application>()
+        val route = MicRoute(app)
         val option = _selectedMic.value
+        val inicio = System.currentTimeMillis()
+        val est = Bitacora.Estadistica()
+        estadistica = est
+        Registro.evento(accion, "inicio", linkedMapOf<String, Any?>("elegido" to option.label) + Registro.equipo(app))
+        var resultado = "ok"
+        var error: String? = null
         try {
             routeDevice = route.open(option)
             routeSource = route.source(option)
+            Registro.evento(
+                accion, "microfono_abierto",
+                linkedMapOf<String, Any?>(
+                    "preferido" to routeDevice?.let { Registro.describir(it) },
+                    "fuente" to if (routeSource == MediaRecorder.AudioSource.VOICE_COMMUNICATION) "VOICE_COMMUNICATION" else "VOICE_RECOGNITION",
+                ) + Registro.equipo(app),
+            )
             return block()
+        } catch (e: CancellationException) {
+            resultado = "detenido"
+            throw e
+        } catch (e: Exception) {
+            resultado = "error"
+            error = e.message ?: e.javaClass.simpleName
+            throw e
         } finally {
             route.close()
             routeDevice = null
             routeSource = MediaRecorder.AudioSource.VOICE_RECOGNITION
+            estadistica = null
+            refrescarRegistro()
+            Registro.evento(
+                accion, "fin",
+                linkedMapOf<String, Any?>(
+                    "resultado" to resultado,
+                    "error" to error,
+                    "elegido" to option.label,
+                    "usado" to _usedMic.value?.label,
+                    "coincide" to _usedMic.value?.let { if (option.kind == MicKind.AUTO) null else if (it.kind == option.kind) "si" else "NO" },
+                    "duracion_s" to (System.currentTimeMillis() - inicio) / 1000.0,
+                ) + est.resumen(),
+            )
         }
+    }
+
+    private fun anotar(frame: AudioFrame) {
+        estadistica?.agregar(
+            frame.rmsDb, frame.peakDb, frame.samples.size, frame.sampleRate,
+            frame.digitalSilence, frame.clientSilenced, frame.clippedFraction > 0.0,
+        )
     }
 
     private fun micFrames(frameSize: Int = MicCapture.FRAME_SIZE) =
         capture.frames(frameSize, routeDevice, routeSource) { device ->
             _usedMic.value = device?.let { MicInputs.option(it) }
-        }
+        }.onEach { anotar(it) }
 
     // ---------- Entorno ----------
+
+    // ---------- Registro ----------
+
+    private val _registro = MutableStateFlow<List<String>>(emptyList())
+    /** Últimas líneas del registro, para mostrarlas en la pantalla. */
+    val registro: StateFlow<List<String>> = _registro.asStateFlow()
+
+    fun refrescarRegistro() {
+        viewModelScope.launch {
+            delay(300) // deja que se escriba la última línea
+            _registro.value = withContext(Dispatchers.IO) { runCatching { Registro.ultimas(12) }.getOrDefault(emptyList()) }
+        }
+    }
+
+    suspend fun textoRegistro(): String = withContext(Dispatchers.IO) { Registro.textoParaEnviar() }
+
+    fun rutaRegistro(): String = Registro.ruta()
 
     fun refreshEnvironment() {
         _environment.value = runCatching { AudioEnvironment.read(getApplication()) }.getOrNull()
         refreshMics()
         refrescarGrabaciones()
+        refrescarRegistro()
     }
 
     // ---------- Medidor en vivo ----------
@@ -194,7 +268,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var holdAge = 0
             try {
                 // Bloques de 50 ms para que la barra se mueva con fluidez.
-                withMic { micFrames(frameSize = MicCapture.FRAME_SIZE / 2).collect { frame ->
+                withMic("MEDIDOR") { micFrames(frameSize = MicCapture.FRAME_SIZE / 2).collect { frame ->
                     // "Pico retenido": la marca se queda ~1 s en el valor más alto y luego baja.
                     if (frame.peakDb >= hold || holdAge > 20) {
                         hold = frame.peakDb
@@ -230,7 +304,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val total = RECORD_SECONDS * 10 // bloques de 100 ms
             val chunks = ArrayList<ShortArray>(total)
             try {
-                withMic {
+                withMic("PRUEBA_5S") {
                     micFrames().take(total).collectIndexed { index, frame ->
                         chunks += frame.samples
                         _record.update {
@@ -254,6 +328,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun playRecording() {
         val samples = lastRecording ?: return
         stopAll()
+        Registro.evento("ESCUCHAR_PRUEBA", "inicio", Registro.equipo(getApplication()))
         _record.value = RecordState(phase = RecordPhase.PLAYING)
         audioJob = viewModelScope.launch {
             try {
@@ -301,9 +376,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val w = withContext(Dispatchers.IO) { WavFile(temporal, frecuencia) }
                 wav = w
                 val captura = MicCapture(frecuencia)
-                withMic {
+                withMic("GRABADORA") {
                     var bloques = 0
                     captura.frames(frecuencia / 10, routeDevice, routeSource) { d -> _usedMic.value = d?.let { MicInputs.option(it) } }
+                        .onEach { anotar(it) }
                         .collect { f ->
                             w.write(f.samples)
                             bloques++
@@ -331,6 +407,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     val etiqueta = _usedMic.value?.label ?: opcion.label
                                     val n = Grabaciones.nombreNuevo(etiqueta)
                                     Grabaciones.guardar(getApplication(), temporal, n, w.durationMs)
+                                    Registro.evento("GRABADORA", "guardada", linkedMapOf("archivo" to n, "duracion_s" to w.durationMs / 1000.0, "bytes" to w.dataBytes + 44))
                                     n
                                 }
                             }.onFailure { error = error ?: "No se pudo guardar: ${it.message}" }.getOrNull()
@@ -346,6 +423,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun reproducir(g: Grabacion) {
         detenerReproduccion()
         stopAll()
+        Registro.evento("REPRODUCIR", "inicio", linkedMapOf<String, Any?>("archivo" to g.nombre) + Registro.equipo(getApplication()))
         runCatching {
             reproductor = MediaPlayer().apply {
                 setDataSource(getApplication(), g.uri)
@@ -364,6 +442,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun borrar(g: Grabacion) {
+        Registro.evento("GRABACION", "borrada", mapOf("archivo" to g.nombre))
         if (_grabadora.value.reproduciendo == g.uri) detenerReproduccion()
         viewModelScope.launch {
             withContext(Dispatchers.IO) { runCatching { Grabaciones.borrar(getApplication(), g) } }
@@ -389,7 +468,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _usedMic.value = null
                 // Mientras se abre el micrófono (con Bluetooth tarda 1–3 s) ya se ve la pantalla del diagnóstico.
                 _diagnosis.value = DiagnosisState.Running(DiagnosisStep.QUIET, 1, totalSteps, 3, 0f, LevelMath.MIN_DB)
-                val (quiet, voice, toneDb) = withMic {
+                val (quiet, voice, toneDb) = withMic("DIAGNOSTICO") {
                     val q = measureStep(DiagnosisStep.QUIET, 1, totalSteps, frames = 25, skip = 5)
                     val v = measureStep(DiagnosisStep.VOICE, 2, totalSteps, frames = 40, skip = 2)
                     Triple(q, v, if (canTestTone) measureTone(3, totalSteps) else null)
@@ -413,10 +492,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     toneBaselineDb = LevelMath.averageDb(quiet.map { it.toneDb(TONE_HZ) }),
                     toneDb = toneDb,
                 )
-                _diagnosis.value = DiagnosisState.Done(DiagnosisAnalyzer.analyze(env, measurements))
+                val resultados = DiagnosisAnalyzer.analyze(env, measurements)
+                Registro.evento(
+                    "DIAGNOSTICO", "mediciones",
+                    linkedMapOf(
+                        "ruido_fondo_dbfs" to measurements.noiseFloorDb,
+                        "voz_dbfs" to measurements.voiceLevelDb,
+                        "voz_pico_dbfs" to measurements.voicePeakDb,
+                        "margen_voz_db" to measurements.voiceLevelDb - measurements.noiseFloorDb,
+                        "silencio_total_quieto" to measurements.quietDigitalSilence,
+                        "silencio_total_voz" to measurements.voiceDigitalSilence,
+                        "silenciado_por_android" to measurements.clientSilenced,
+                        "tono_dbfs" to measurements.toneDb,
+                    ),
+                )
+                resultados.forEach { r ->
+                    Registro.evento("DIAGNOSTICO", "resultado", linkedMapOf("prueba" to r.title, "estado" to r.status.name, "detalle" to r.detail))
+                }
+                _diagnosis.value = DiagnosisState.Done(resultados)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                Registro.evento("DIAGNOSTICO", "fallo", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
                 _diagnosis.value = DiagnosisState.Failed(e.message ?: "Error inesperado durante el diagnóstico.")
             }
         }

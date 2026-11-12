@@ -10,6 +10,9 @@ App Android que revisa si el micrófono del celular funciona bien y da sugerenci
 - **Elegir el micrófono**: Automático, el del celular, audífonos con cable, USB o **Bluetooth**. Con Bluetooth la app abre el «modo llamada» del audífono (perfil HFP/SCO), que es el único en el que Android deja usar su micrófono, y lo cierra al terminar. Avisa si Android terminó grabando con otro micrófono. La elección se recuerda.
 - **Grabadora**: graba todo lo que quieras con el micrófono elegido (también **Bluetooth**) y lo guarda como WAV en `Recordings/El Juicio` (Android 12+; antes en `Music/El Juicio`), donde lo ven la grabadora, Archivos y WhatsApp. Lista con ▶ escuchar, Enviar y ✕ borrar. Con Bluetooth graba a 16 kHz (lo máximo del canal de llamada). Máximo 60 min; si sales de la app, se detiene y se guarda.
 - **Bluetooth para otras apps (experimental)**: Android no deja que una app elija el micrófono de las demás. Este modo deja abierto el canal de llamada del audífono (con una notificación para detenerlo); en muchos celulares, mientras está activo, las otras apps graban con el Bluetooth. Depende del fabricante. Pide los permisos «Dispositivos cercanos» (Bluetooth) y notificaciones.
+- **Registro**: cada acción (medidor, prueba de 5 s, grabadora, diagnóstico con sus resultados, elegir micrófono, «Bluetooth para otras apps») deja líneas con la hora, el micrófono elegido y el que usó Android, el modo de audio, a dónde va la llamada (SCO), entradas y salidas, y al final lo que llegó del micrófono: niveles por segundo, silencio digital, silenciado por Android, saturación. No guarda audio. Un archivo por día, 14 días.
+  - Desde el celular: **Enviar registro** (o Copiar) y elegir la app de Claude.
+  - Desde el PC con cable: `adb -s ZY22KKQ9LD pull /sdcard/Android/data/com.dseu1.miccheck/files/registros %USERPROFILE%\Downloads\eljuicio-registros`
 - **Diagnóstico completo** (unos 20 s, 3 pasos):
   1. *Ruido de fondo*: el usuario guarda silencio y se mide el ruido.
   2. *Tu voz*: el usuario habla; se mide cuánto sobresale la voz del ruido y si hay saturación.
@@ -48,9 +51,11 @@ app/src/main/java/com/dseu1/miccheck/
 │   ├── MicInputs.kt           Micrófonos conectados (AudioManager.getDevices).
 │   ├── MicRoute.kt            Abre/cierra el camino al micrófono (Bluetooth: modo llamada).
 │   ├── WavFile.kt             Escribe WAV mientras graba. Sin Android.
+│   ├── Bitacora.kt            Formato de las líneas del registro y estadísticas. Sin Android.
 │   └── PuenteBluetooth.kt     Servicio «Bluetooth para otras apps» (experimental).
 ├── datos/
-│   └── Grabaciones.kt         Guardar, listar y borrar grabaciones (MediaStore).
+│   ├── Grabaciones.kt         Guardar, listar y borrar grabaciones (MediaStore).
+│   └── Registro.kt            Registro por día + foto del estado del audio.
 │   ├── PcmPlayer.kt           AudioTrack: reproduce PCM y genera el tono.
 │   ├── EnvironmentInfo.kt     Datos del entorno (clase simple).
 │   └── AudioEnvironment.kt    Lee el entorno desde AudioManager.
