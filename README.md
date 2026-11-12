@@ -8,6 +8,8 @@ App Android que revisa si el micrófono del celular funciona bien y da sugerenci
 ## Qué hace
 
 - **Elegir el micrófono**: Automático, el del celular, audífonos con cable, USB o **Bluetooth**. Con Bluetooth la app abre el «modo llamada» del audífono (perfil HFP/SCO), que es el único en el que Android deja usar su micrófono, y lo cierra al terminar. Avisa si Android terminó grabando con otro micrófono. La elección se recuerda.
+- **Grabadora**: graba todo lo que quieras con el micrófono elegido (también **Bluetooth**) y lo guarda como WAV en `Recordings/El Juicio` (Android 12+; antes en `Music/El Juicio`), donde lo ven la grabadora, Archivos y WhatsApp. Lista con ▶ escuchar, Enviar y ✕ borrar. Con Bluetooth graba a 16 kHz (lo máximo del canal de llamada). Máximo 60 min; si sales de la app, se detiene y se guarda.
+- **Bluetooth para otras apps (experimental)**: Android no deja que una app elija el micrófono de las demás. Este modo deja abierto el canal de llamada del audífono (con una notificación para detenerlo); en muchos celulares, mientras está activo, las otras apps graban con el Bluetooth. Depende del fabricante. Pide los permisos «Dispositivos cercanos» (Bluetooth) y notificaciones.
 - **Diagnóstico completo** (unos 20 s, 3 pasos):
   1. *Ruido de fondo*: el usuario guarda silencio y se mide el ruido.
   2. *Tu voz*: el usuario habla; se mide cuánto sobresale la voz del ruido y si hay saturación.
@@ -45,6 +47,10 @@ app/src/main/java/com/dseu1/miccheck/
 │   ├── MicKind.kt             Tipos de micrófono y la opción elegida. Sin Android.
 │   ├── MicInputs.kt           Micrófonos conectados (AudioManager.getDevices).
 │   ├── MicRoute.kt            Abre/cierra el camino al micrófono (Bluetooth: modo llamada).
+│   ├── WavFile.kt             Escribe WAV mientras graba. Sin Android.
+│   └── PuenteBluetooth.kt     Servicio «Bluetooth para otras apps» (experimental).
+├── datos/
+│   └── Grabaciones.kt         Guardar, listar y borrar grabaciones (MediaStore).
 │   ├── PcmPlayer.kt           AudioTrack: reproduce PCM y genera el tono.
 │   ├── EnvironmentInfo.kt     Datos del entorno (clase simple).
 │   └── AudioEnvironment.kt    Lee el entorno desde AudioManager.

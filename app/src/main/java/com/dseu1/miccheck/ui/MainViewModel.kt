@@ -4,6 +4,12 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.content.Context
 import android.media.AudioDeviceInfo
+import android.media.MediaPlayer
+import android.net.Uri
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import android.media.MediaRecorder
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -17,6 +23,9 @@ import com.dseu1.miccheck.audio.MicKind
 import com.dseu1.miccheck.audio.MicOption
 import com.dseu1.miccheck.audio.MicRoute
 import com.dseu1.miccheck.audio.PcmPlayer
+import com.dseu1.miccheck.audio.WavFile
+import com.dseu1.miccheck.datos.Grabacion
+import com.dseu1.miccheck.datos.Grabaciones
 import com.dseu1.miccheck.diagnosis.CheckResult
 import com.dseu1.miccheck.diagnosis.DiagnosisAnalyzer
 import com.dseu1.miccheck.diagnosis.Measurements
@@ -66,6 +75,18 @@ sealed interface DiagnosisState {
     data class Done(val results: List<CheckResult>) : DiagnosisState
     data class Failed(val message: String) : DiagnosisState
 }
+
+/** Grabadora: graba con el micrófono elegido (también Bluetooth) y guarda un WAV. */
+data class GrabadoraState(
+    val grabando: Boolean = false,
+    val guardando: Boolean = false,
+    val segundos: Int = 0,
+    val nivelDb: Double = LevelMath.MIN_DB,
+    val error: String? = null,
+    val guardada: String? = null,
+    val grabaciones: List<Grabacion> = emptyList(),
+    val reproduciendo: Uri? = null,
+)
 
 enum class RecordPhase { IDLE, RECORDING, READY, PLAYING }
 
@@ -156,6 +177,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshEnvironment() {
         _environment.value = runCatching { AudioEnvironment.read(getApplication()) }.getOrNull()
         refreshMics()
+        refrescarGrabaciones()
     }
 
     // ---------- Medidor en vivo ----------
@@ -247,6 +269,109 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    // ---------- Grabadora (guarda el audio) ----------
+
+    private val _grabadora = MutableStateFlow(GrabadoraState())
+    val grabadora: StateFlow<GrabadoraState> = _grabadora.asStateFlow()
+    private var reproductor: MediaPlayer? = null
+
+    fun refrescarGrabaciones() {
+        viewModelScope.launch {
+            val lista = withContext(Dispatchers.IO) { runCatching { Grabaciones.listar(getApplication()) }.getOrDefault(emptyList()) }
+            _grabadora.update { it.copy(grabaciones = lista) }
+        }
+    }
+
+    fun grabadoraIniciarODetener() {
+        if (_grabadora.value.grabando) stopAll() else iniciarGrabadora()
+    }
+
+    private fun iniciarGrabadora() {
+        stopAll()
+        val opcion = _selectedMic.value
+        // El Bluetooth de llamada llega a 16 kHz como mucho: grabar a 16 kHz ocupa un tercio.
+        val frecuencia = if (opcion.kind == MicKind.BLUETOOTH) 16_000 else MicCapture.SAMPLE_RATE
+        _grabadora.update { it.copy(grabando = true, segundos = 0, error = null, guardada = null) }
+        audioJob = viewModelScope.launch {
+            val temporal = File(getApplication<Application>().cacheDir, "grabando.wav")
+            var wav: WavFile? = null
+            var error: String? = null
+            try {
+                val w = withContext(Dispatchers.IO) { WavFile(temporal, frecuencia) }
+                wav = w
+                val captura = MicCapture(frecuencia)
+                withMic {
+                    var bloques = 0
+                    captura.frames(frecuencia / 10, routeDevice, routeSource) { d -> _usedMic.value = d?.let { MicInputs.option(it) } }
+                        .collect { f ->
+                            w.write(f.samples)
+                            bloques++
+                            _grabadora.update { it.copy(segundos = bloques / 10, nivelDb = f.rmsDb) }
+                            if (bloques >= MAX_GRABACION_SEGUNDOS * 10) throw MaximoAlcanzado()
+                        }
+                }
+            } catch (e: MaximoAlcanzado) {
+                error = "Se llegó al máximo de ${MAX_GRABACION_SEGUNDOS / 60} minutos; quedó guardado."
+            } catch (e: CancellationException) {
+                // Se detuvo con el botón (o al salir de la app): se guarda lo grabado.
+            } catch (e: Exception) {
+                error = e.message ?: "No se pudo grabar."
+            } finally {
+                withContext(NonCancellable) {
+                    val w = wav
+                    var nombre: String? = null
+                    if (w != null) {
+                        _grabadora.update { it.copy(grabando = false, guardando = true) }
+                        nombre = withContext(Dispatchers.IO) {
+                            runCatching {
+                                w.close()
+                                if (w.dataBytes < frecuencia / 2) { temporal.delete(); null } // menos de 0,25 s: nada que guardar
+                                else {
+                                    val etiqueta = _usedMic.value?.label ?: opcion.label
+                                    val n = Grabaciones.nombreNuevo(etiqueta)
+                                    Grabaciones.guardar(getApplication(), temporal, n, w.durationMs)
+                                    n
+                                }
+                            }.onFailure { error = error ?: "No se pudo guardar: ${it.message}" }.getOrNull()
+                        }
+                    }
+                    val lista = withContext(Dispatchers.IO) { runCatching { Grabaciones.listar(getApplication()) }.getOrDefault(emptyList()) }
+                    _grabadora.update { it.copy(grabando = false, guardando = false, error = error, guardada = nombre, grabaciones = lista) }
+                }
+            }
+        }
+    }
+
+    fun reproducir(g: Grabacion) {
+        detenerReproduccion()
+        stopAll()
+        runCatching {
+            reproductor = MediaPlayer().apply {
+                setDataSource(getApplication(), g.uri)
+                setOnCompletionListener { detenerReproduccion() }
+                prepare()
+                start()
+            }
+            _grabadora.update { it.copy(reproduciendo = g.uri) }
+        }.onFailure { e -> _grabadora.update { it.copy(error = "No se pudo reproducir: ${e.message}") } }
+    }
+
+    fun detenerReproduccion() {
+        reproductor?.runCatching { stop(); release() }
+        reproductor = null
+        _grabadora.update { it.copy(reproduciendo = null) }
+    }
+
+    fun borrar(g: Grabacion) {
+        if (_grabadora.value.reproduciendo == g.uri) detenerReproduccion()
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { runCatching { Grabaciones.borrar(getApplication(), g) } }
+            refrescarGrabaciones()
+        }
+    }
+
+    private class MaximoAlcanzado : Exception()
 
     // ---------- Diagnóstico completo ----------
 
@@ -362,6 +487,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         stopAll()
+        detenerReproduccion()
     }
 
     private fun concat(chunks: List<ShortArray>): ShortArray {
@@ -377,5 +503,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         const val TONE_HZ = 1_000.0
         const val RECORD_SECONDS = 5
+        const val MAX_GRABACION_SEGUNDOS = 60 * 60
     }
 }
